@@ -1548,6 +1548,7 @@ impl Editor {
         // before the caches are reset for this frame.
         let overlays = self.render_overlays(window, cx);
         let lightbox = self.lightbox_el(window, cx);
+        let video = self.video_fullscreen_el(window, cx);
         let board = self.board_el();
         self.sync_tables(window, cx);
         let toast = self.toast_el(window);
@@ -1853,6 +1854,7 @@ impl Editor {
             .children(counter)
             .children(find_box)
             .children(lightbox)
+            .children(video)
             .children(board)
             .children(toast)
             .child(root_canvas)
