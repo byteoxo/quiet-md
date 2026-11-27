@@ -30,7 +30,7 @@ impl<'a> Tree<'a> {
 
     /// 我的文档 ordered by the page list's setting (`order`), or — when it is
     /// not given — by the arrangement the user dragged into place.
-    pub fn with_order(entries: &'a [Entry], order: Option<crate::home::Order>) -> Self {
+    pub fn with_order(entries: &'a [Entry], order: Option<crate::folder_page::Order>) -> Self {
         // Only folders take children. Every step over all entries is one lookup in
         // this small table, not a set of every id: the tree is rebuilt each frame
         // the sidebar draws, and a vault of 15,000 notes made that 5 ms a frame.
@@ -96,6 +96,27 @@ impl<'a> Tree<'a> {
         out
     }
 
+    /// Of `ids`, those none of the others holds, in their order (上层优先): a folder
+    /// picked with something in it is moved, copied or deleted once, as a whole.
+    pub fn outermost(&self, ids: &[String]) -> Vec<String> {
+        let inner: HashSet<String> = ids.iter().flat_map(|id| self.subtree(id).into_iter().skip(1)).collect();
+        let mut out: Vec<String> = vec![];
+        for id in ids { if !inner.contains(id) && !out.contains(id) { out.push(id.clone()); } }
+        out
+    }
+
+    /// How many documents the rows `ids` hold under them (删除's 「包括其中的 M 篇文档」):
+    /// each page inside, a folder with a 正文 counting as its document; not the rows themselves.
+    pub fn docs_inside(&self, ids: &[String]) -> usize {
+        let mut stack: Vec<&Entry> = self.outermost(ids).iter().flat_map(|id| self.children(Some(id)).iter().copied()).collect();
+        let mut n = 0;
+        while let Some(e) = stack.pop() {
+            if e.meta.folder.is_none() || self.notes.contains_key(e.id.as_str()) { n += 1; }
+            stack.extend(self.children(Some(&e.id)).iter().copied());
+        }
+        n
+    }
+
     /// `id` and every page under it, folders' 正文 included.
     pub fn subtree(&self, id: &str) -> Vec<String> {
         let mut out = vec![id.to_string()];
@@ -110,7 +131,7 @@ impl<'a> Tree<'a> {
     }
 }
 
-/// What a sidebar row or a Home card shows of `e`: its links, reminders and body stay behind.
+/// What a sidebar row or a folder page's card shows of `e`: its links, reminders and body stay behind.
 pub(crate) fn face(e: &Entry) -> Entry {
     Entry { id: e.id.clone(), meta: e.meta.clone(), title: e.title.clone(), icon: e.icon.clone(), body: Default::default(),
         reminders: vec![], links: vec![], note: e.note.clone(), top: e.top.clone() }
@@ -248,8 +269,10 @@ impl Workspace {
 
     fn close_move(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.move_dlg = None;
-        if let Some(ed) = &self.editor {
-            { let f = ed.read(cx).focus.clone(); window.focus(&f, cx); }
+        // Back to the page (a folder's page: the window), so ⌘Z reaches 撤销 right away.
+        match &self.editor {
+            Some(ed) => { let f = ed.read(cx).focus.clone(); window.focus(&f, cx); }
+            None => window.focus(&self.focus, cx),
         }
         cx.notify();
     }
@@ -262,8 +285,15 @@ impl Workspace {
     pub(crate) fn move_docs(&mut self, ids: &[String], target: Option<String>, cx: &mut Context<Self>) {
         use crate::tree_writes::{PendingMove, TreeWrite};
         let ids: Vec<String> = ids.iter().map(|id| self.row_of(id)).collect();
-        let ids: Vec<String> = ids.into_iter().filter(|id| !target.as_ref().is_some_and(|t| Tree::new(&self.entries).subtree(id).contains(t))).collect();
-        if ids.is_empty() { return; }
+        let tree = Tree::new(&self.entries);
+        // 上层优先: what a moved folder holds goes with it, not out of it.
+        let picked = tree.outermost(&ids);
+        let ids: Vec<String> = picked.iter().filter(|id| !target.as_ref().is_some_and(|t| tree.subtree(id).contains(t))).cloned().collect();
+        if ids.is_empty() {
+            // The dialog hides the picked folders; this is its safety net.
+            if !picked.is_empty() { self.show_toast_kind(crate::ui::ToastKind::Error, crate::settings::tr("不能移到所选文件夹里面", "Can't move into a selected folder"), cx); }
+            return;
+        }
         let file_before = self.entries.to_vec();
         let mut moves: Vec<PendingMove> = ids.iter().map(|id| PendingMove { id: id.clone(), parent: target.clone(), before: None, history: 0, joined: ids.len() > 1 }).collect();
         for m in &moves { self.apply_tree_move(m); }
@@ -317,7 +347,7 @@ impl Workspace {
                     .rounded(px(9.))
                     .bg(Theme::fill_hover_strong())
                     .child(icon("folder", 15., Theme::icon()))
-                    .child(div().ml(px(8.)).text_size(px(theme::ui_font())).line_height(px(theme::ui_font() + 7.)).child(self.home_name())),
+                    .child(div().ml(px(8.)).text_size(px(theme::ui_font())).line_height(px(theme::ui_font() + 7.)).child(self.front_top_name())),
             );
 
         let row = |key: String, selected: bool| {
@@ -339,7 +369,8 @@ impl Workspace {
             Some(em) => div().size(px(16.)).flex_none().flex().items_center().justify_center().text_size(px(14.)).child(em.clone()).into_any_element(),
             None => icon(crate::search::file_glyph(&e.meta), 16., Theme::icon()).into_any_element(),
         };
-        let mut list = div().id("move-tree").flex_1().min_w_0().px(px(8.)).py(px(12.)).overflow_y_scroll().track_scroll(&dlg.scroll);
+        // rows 8 from the side: while the tree scrolls it makes room for the shared scrollbar's lane
+        let mut list = crate::design::scroll::make_room(div().id("move-tree").flex_1().min_w_0().px(px(8.)).py(px(12.)).overflow_y_scroll().track_scroll(&dlg.scroll), "move-tree", 8.);
         if q.is_empty() {
             list = list.child(
                 row("move-root".into(), dlg.target == Some(None))
@@ -373,7 +404,7 @@ impl Workspace {
                                 .rounded(px(5.))
                                 .when(kids, |d| {
                                     d.hover(|s| s.bg(Theme::fill_hover_strong()))
-                                        .child(icon("tree-triangle", 10., Theme::icon()).when(open, |s| s.with_transformation(Transformation::rotate(radians(std::f32::consts::FRAC_PI_2)))))
+                                        .child(icon("tree-triangle", 10., Theme::icon_muted()).when(open, |s| s.with_transformation(Transformation::rotate(radians(std::f32::consts::FRAC_PI_2)))))
                                         .on_click(cx.listener(move |w, _, _, cx| {
                                             cx.stop_propagation();
                                             if let Some(d) = w.move_dlg.as_mut()
@@ -386,6 +417,7 @@ impl Workspace {
                         )
                         .child(page_icon(e))
                         .child(title(display_title(&e.title)))
+                        .relative().children(crate::devtools::anchor_probe(format!("move:{}", display_title(&e.title))))
                         .on_click(cx.listener(move |w, _, _, cx| {
                             if let Some(d) = w.move_dlg.as_mut() {
                                 d.target = Some(Some(pick.clone()));
@@ -406,6 +438,7 @@ impl Workspace {
                         .pl(px(16.))
                         .child(page_icon(e))
                         .child(title(display_title(&e.title)))
+                        .relative().children(crate::devtools::anchor_probe(format!("move:{}", display_title(&e.title))))
                         .on_click(cx.listener(move |w, _, _, cx| {
                             if let Some(d) = w.move_dlg.as_mut() {
                                 d.target = Some(Some(pick.clone()));
@@ -418,7 +451,7 @@ impl Workspace {
 
         let ready = dlg.target.is_some();
         // 确定 waits for a target.
-        let ok = Button::primary("move-ok").label(crate::settings::text("确定")).disabled(!ready);
+        let ok = Button::primary("move-ok").label(crate::settings::text("确定")).disabled(!ready).relative().children(crate::devtools::anchor_probe("move-ok"));
         let dialog = Dialog::new("move-dialog")
             .relative()
             .w(px(828.))
@@ -435,7 +468,7 @@ impl Workspace {
                     .overflow_hidden()
                     .child(left)
                     .child(Separator::new().vertical())
-                    .child(list),
+                    .child(list.child(crate::design::scroll::bar("move-tree", &dlg.scroll, crate::design::geo().button_r))),
             )
             .footer(
                 div()
@@ -470,12 +503,12 @@ mod tests {
     use super::Tree;
     use std::collections::{HashMap, HashSet};
     use crate::store::Entry;
-    use crate::home::{HomeSort, Order, SortDir};
+    use crate::folder_page::{PageSort, Order, SortDir};
     use crate::store::Meta;
 
     // The tree as it was built before #big-library-perf, to hold the faster one to.
     impl<'a> Tree<'a> {
-    fn old(entries: &'a [Entry], order: Option<crate::home::Order>) -> Self {
+    fn old(entries: &'a [Entry], order: Option<crate::folder_page::Order>) -> Self {
         let ids: HashSet<&str> = entries.iter().filter(|e| e.meta.folder.is_some()).map(|e| e.id.as_str()).collect();
         let parent = |e: &'a Entry| e.meta.parent.as_deref().filter(|p| ids.contains(p) && *p != e.id);
         let notes: HashMap<&str, &str> = entries.iter().filter_map(|e| Some((e.id.as_str(), e.note.as_deref()?))).collect();
@@ -533,14 +566,35 @@ mod tests {
         (rows, kids)
     }
 
+    /// 批量管理 with folders: a page inside a picked folder is not acted on
+    /// twice (上层优先); 删除 counts the documents the picked folders hold; a
+    /// folder's subtree is where 移动到 must not put it.
+    #[test]
+    fn picked_folders_take_what_they_hold() {
+        let e = |id: &str, folder: bool, parent: Option<&str>| entry(id.into(), folder, parent.map(str::to_string), 0);
+        // a/{x, b/{y, n(正文 of b), c/{}}}, z
+        let mut entries = vec![e("a", true, None), e("x", false, Some("a")), e("b", true, Some("a")), e("y", false, Some("b")),
+            e("n", false, Some("b")), e("c", true, Some("b")), e("z", false, None)];
+        entries[2].note = Some("n".into());
+        let t = Tree::new(&entries);
+        let ids = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(t.outermost(&ids(&["y", "a", "z", "b", "a"])), ids(&["a", "z"]));
+        assert_eq!(t.outermost(&ids(&["n", "b"])), ids(&["b"]), "a 正文 is its folder's");
+        // x, b (a document with children), y; not the empty folder c, nor the rows themselves.
+        assert_eq!(t.docs_inside(&ids(&["a", "y"])), 3);
+        assert_eq!(t.docs_inside(&ids(&["b"])), 1);
+        assert_eq!(t.docs_inside(&ids(&["c", "z"])), 0);
+        assert!(t.subtree("a").contains(&"c".to_string()) && !t.subtree("b").contains(&"a".to_string()));
+    }
+
     /// Same rows, depths and children as the old build, on random libraries
     /// with cycles, pages that are their own parent, 本机文件 and folders' 正文.
     #[test]
     fn same_tree_as_before() {
         let mut seed = 7u64;
         let mut next = |n: u64| { seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407); (seed >> 33) % n };
-        let orders = [None, Some(Order { field: HomeSort::Title, dir: SortDir::Asc, folders_first: true }),
-            Some(Order { field: HomeSort::Modified, dir: SortDir::Desc, folders_first: false })];
+        let orders = [None, Some(Order { field: PageSort::Title, dir: SortDir::Asc, folders_first: true }),
+            Some(Order { field: PageSort::Modified, dir: SortDir::Desc, folders_first: false })];
         for round in 0..300 {
             let n = 1 + next(60) as usize;
             let mut entries: Vec<Entry> = (0..n).map(|i| {

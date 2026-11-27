@@ -179,7 +179,7 @@ fn assets_above(blocks: &mut [Block], dir: &Path, root: Option<&Path>) {
 }
 
 /// One scanned folder as a library folder under `parent`; its id. Needs no
-/// window, so 欢迎页 can import on a background thread before the main window.
+/// window, so it can run on a background thread.
 pub(crate) fn import_tree(store: &mut crate::store::Store, t: &Scanned, parent: Option<&str>, failed: &mut usize) -> Option<String> {
     tree(store, t, &t.dir, parent, failed)
 }
@@ -709,7 +709,7 @@ impl Workspace {
     pub(crate) fn place_name(&self, parent: Option<&str>) -> String {
         match parent {
             Some(p) => self.entries.iter().find(|e| e.id == p).map(|e| if crate::shared_store::top_of_row(&e.id).is_some() { self.folder_name(&e.top) } else { crate::settings::display_title(&e.title) }).unwrap_or_default(),
-            None => self.home_name(),
+            None => self.front_top_name(),
         }
     }
 
@@ -732,7 +732,8 @@ impl Workspace {
             .child(MenuLabel::new(crate::localized_format!("「{}」是一个 Obsidian 库", "“{}” is an Obsidian vault", name)))
             .children(self.vault_rows(&place, cx)));
         let found = apps.found.as_ref().filter(|f| !f.is_empty()).map(|found| {
-            crate::table::style::inset_list("import-found-list").max_h(px(220.)).overflow_y_scroll()
+            // the shared scrollbar in its own lane, as the table's inset lists keep it
+            crate::design::scroll::make_room(crate::table::style::inset_list("import-found-list").max_h(px(220.)).overflow_y_scroll().track_scroll(&crate::design::scroll::handle("import-found-list")), "import-found-list", crate::design::menu::PAD)
                 .child(MenuLabel::new(crate::settings::tr("在这台电脑上找到", "Found on this computer")))
                 .children(found.iter().enumerate().flat_map(|(i, f)| {
                     let row = MenuItem::new(("import-found", i)).icon(f.source().icon()).label(f.title()).description(f.desc())
@@ -740,6 +741,7 @@ impl Workspace {
                     let open = matches!(&apps.choose, Some(Choice::At(p, _)) if *p == f.path);
                     std::iter::once(row).chain(if open { self.vault_rows(&place, cx) } else { vec![] })
                 }).collect::<Vec<_>>())
+                .child(crate::design::scroll::bar("import-found-list", &crate::design::scroll::handle("import-found-list"), crate::design::geo().menu_r))
         });
         let ws = cx.entity().downgrade();
         let dialog = Dialog::new("import-apps")
@@ -765,9 +767,9 @@ impl Workspace {
                 .on_click(cx.listener(move |w, _, window, cx| { w.create_menu = None; w.open_import_kind(kind, parent.clone(), window, cx) }))
         };
         let mut out = vec![
-            // The two that read like 打开: the line under each says it copies.
-            item("import-md", "doc-md", crate::settings::tr("导入 Markdown 文件…", "Import Markdown Files…"), ImportKind::Markdown).description(crate::settings::tr("复制到这里", "Copies here")),
-            item("import-folder", "folder", crate::settings::tr("导入文件夹…", "Import Folder…"), ImportKind::Folder).description(crate::settings::tr("复制到这里", "Copies here")),
+            // Everything here copies in; only the header's 添加文件夹 uses a folder where it is.
+            item("import-md", "doc-md", crate::settings::tr("导入 Markdown 文件…", "Import Markdown Files…"), ImportKind::Markdown),
+            item("import-folder", "folder", crate::settings::tr("导入文件夹…", "Import Folder…"), ImportKind::Folder),
             {
                 let parent = parent.clone();
                 crate::design::MenuItem::new("import-apps").icon("import").label(crate::settings::tr("从其他应用导入…", "Import from Another App…"))
@@ -775,7 +777,7 @@ impl Workspace {
             },
             item("import-xml", "doc", crate::settings::tr("导入 DocxXML…", "Import DocxXML…"), ImportKind::DocxXml),
         ];
-        out.push(item("import-csv", "datatable", crate::settings::tr("从 CSV 新建数据表…", "New Data Table from CSV…"), ImportKind::Csv));
+        out.push(item("import-csv", "table-import", crate::settings::tr("从 CSV 新建数据表…", "New Data Table from CSV…"), ImportKind::Csv));
         out
     }
 
@@ -929,7 +931,7 @@ impl Workspace {
             // 导入 copies: say what went where, and that the original stayed as it was.
             let (name, place) = (crate::settings::display_title(&e.title), self.place_name(e.meta.parent.as_deref()));
             self.show_toast(&crate::localized_format!("已复制「{}」到「{}」，原文件夹未改动", "Copied “{}” into “{}”; the original folder is untouched", name, place), cx);
-        } else if self.toast.as_ref().is_some_and(|t| matches!(t.0, ToastKind::Info) && t.1.as_ref() == crate::settings::tr("正在导入…", "Importing…")) { self.toast = None; }
+        } else if self.toast.as_ref().is_some_and(|t| matches!(t.kind, ToastKind::Info) && t.msg.as_ref() == crate::settings::tr("正在导入…", "Importing…")) { self.toast = None; }
         cx.notify();
     }
 
@@ -1208,7 +1210,7 @@ mod tests {
 
     #[test]
     fn a_folder_import_keeps_each_files_times() {
-        // 导入文件夹, a dropped folder, and 欢迎页's Obsidian / Typora import (import_tree).
+        // 导入文件夹, a dropped folder, and 从其他应用导入's Obsidian / Typora import (import_tree).
         let (tmp, from, mut store) = places("folder");
         aged(&from.join("vault/a.md"), "a", THEN);
         aged(&from.join("vault/sub/b.md"), "b", THEN + 60);

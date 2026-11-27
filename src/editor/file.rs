@@ -442,7 +442,7 @@ impl R<'_> {
                     .rounded(px(RADIUS))
                     .border_1()
                     .border_color(border)
-                    .shadow(theme::shadow_button())
+                    .shadow(crate::design::shadow::rest())
                     .cursor_pointer()
                     .when(menu_on, |d| d.child(ring().rounded(px(RADIUS + 2.))))
                     .child(div().rounded(px(RADIUS - 1.)).overflow_hidden().child(content).child(footer))
@@ -483,7 +483,7 @@ impl R<'_> {
                     .border_1()
                     .border_color(border)
                     .bg(crate::theme::raised(Theme::bg_body()))
-                    .shadow(theme::shadow_button())
+                    .shadow(crate::design::shadow::rest())
                     .cursor_pointer()
                     .when(menu_on, |d| d.child(ring().rounded(px(RADIUS + 2.))))
                     .child(div().flex_none().size(px(48.)).mt(px(8.)).mb(px(8.)).ml(px(8.)).mr(px(12.)).child(type_icon(kind, 48.)))
@@ -712,10 +712,10 @@ impl Editor {
         }
     }
 
-    /// 预览 (the eye, a video's play): inline video playback, otherwise Quick Look.
+    /// 预览 (the eye, a video's play): inline video on macOS, otherwise the system viewer.
     pub(super) fn preview_file(&mut self, p: Option<&Path>, cx: &mut Context<Self>) {
         match p.filter(|p| p.fs_is_file()) {
-            Some(p) if kind_of(&p.to_string_lossy()) == Kind::Video && previewable(&p.to_string_lossy()) => {
+            Some(p) if cfg!(target_os = "macos") && kind_of(&p.to_string_lossy()) == Kind::Video && previewable(&p.to_string_lossy()) => {
                 let mut in_page = false;
                 self.core.doc.for_each_block(|b| {
                     if let BlockKind::File(f) = &b.kind { in_page |= local_path(f).as_deref() == Some(p); }
@@ -728,7 +728,11 @@ impl Editor {
                 self.tick_media(cx);
                 cx.notify();
             }
-            Some(p) => quick_look(p),
+            // Quick Look is the Mac's (`qlmanage`); elsewhere the system's own app for the file, or
+            // the file shown in its folder when opening it would run a program
+            Some(p) if cfg!(target_os = "macos") || crate::devtools::scripted() || cfg!(target_family = "wasm") => quick_look(p),
+            Some(p) if crate::local_files::runs_program(p) => cx.reveal_path(p),
+            Some(p) => cx.open_with_system(p),
             None => self.toast(crate::settings::text("文件不存在"), cx),
         }
     }
